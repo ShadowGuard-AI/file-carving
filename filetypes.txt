@@ -1,0 +1,19 @@
+# Default file type signatures for file-carving.
+# Format: a type name in brackets, then header and footer as hex.
+[jpg]
+header=FFD8FF
+footer=FFD9
+[png]
+header=89504E470D0A1A0A
+footer=49454E44AE426082
+[gif]
+header=47494638
+footer=3B
+[pdf]
+header=25504446
+footer=2525454F46
+[zip]
+header=504B0304
+footer=504B0506
+[bmp]
+header=424D

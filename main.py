@@ -5,9 +5,8 @@ import logging
 import pathlib
 import struct  # For unpacking binary data
 import os  # For checking file existence
+import sys
 
-# Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 class FileCarver:
     """
@@ -58,7 +57,10 @@ class FileCarver:
     def carve_files(self):
         """
         Carves files from the disk image based on file type signatures.
+        Returns (carved_count, skipped_unmatched_count).
         """
+        self.carved_count = 0
+        self.skipped_count = 0
         try:
             with open(self.image_path, 'rb') as f:
                 data = f.read()
@@ -82,6 +84,9 @@ class FileCarver:
                             end_indices = self._find_all(data[start_index:], footer_bytes)
                             if end_indices:  # Use the *first* footer after the header
                                 end_index = start_index + end_indices[0] + len(footer_bytes)
+                            else:
+                                self.skipped_count += 1
+                                self.logger.warning(f"Unmatched header for {file_type} at offset {start_index}: no footer found, skipped.")
                         else:
                             # If no footer is specified, try to carve a block_size chunk after the header.
                             end_index = start_index + self.block_size
@@ -91,12 +96,15 @@ class FileCarver:
                             carved_data = data[start_index:end_index]
 
                             # Sanitize the filename using pathlib
-                            filename = f"recovered_{start_index}_{file_type}.dat" # Or .jpg .png etc.
+                            ext_map = {'jpeg': 'jpg', 'jpg': 'jpg', 'png': 'png', 'gif': 'gif', 'pdf': 'pdf', 'zip': 'zip', 'bmp': 'bmp'}
+                            ext = ext_map.get(file_type.lower(), ''.join(c for c in file_type.lower() if c.isalnum()) or 'dat')
+                            filename = f"recovered_{start_index}_{file_type}.{ext}"
                             file_path = pathlib.Path(self.output_dir) / filename
 
                             try:
                                 with open(file_path, 'wb') as outfile:
                                     outfile.write(carved_data)
+                                self.carved_count += 1
                                 self.logger.info(f"Recovered {file_type} file: {file_path}")
                             except Exception as e:
                                 self.logger.error(f"Error writing file: {file_path}. Error: {e}")
@@ -106,6 +114,8 @@ class FileCarver:
         except Exception as e:
             self.logger.error(f"An error occurred: {e}")
             raise
+        self.logger.info(f"Skipped unmatched headers: {self.skipped_count}")
+        return (self.carved_count, self.skipped_count)
 
     def _find_all(self, data, sub):
         """Find all occurrences of a sub-byte sequence within a byte sequence."""
@@ -128,7 +138,7 @@ def setup_argparse():
     parser = argparse.ArgumentParser(description='File carving tool.')
     parser.add_argument('image', help='Path to the disk image or file.')
     parser.add_argument('output', help='Directory to save recovered files.')
-    parser.add_argument('--blocksize', type=int, default=512, help='Block size to read (default: 512).')
+    parser.add_argument('--blocksize', type=int, default=512, help='Number of bytes carved starting at a header when no footer is defined for that file type (default: 512).')
     parser.add_argument('--filetypes', type=str, default="filetypes.txt", help='Path to the file containing file type signatures. (default: filetypes.txt)')
     parser.add_argument('--log', type=str, default="carver.log", help='Path to the log file. (default: carver.log)')
     return parser
@@ -169,18 +179,24 @@ def main():
     parser = setup_argparse()
     args = parser.parse_args()
 
-    # Configure logging to file
-    logging.basicConfig(filename=args.log, level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-    logging.getLogger().addHandler(logging.StreamHandler()) # Also log to console
-
-
+    logging.basicConfig(filename=args.log, level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', force=True)
+    logging.getLogger().addHandler(logging.StreamHandler())
     try:
         file_types = load_file_types(args.filetypes)
         carver = FileCarver(args.image, args.output, file_types, args.blocksize)
-        carver.carve_files()
+        carved, skipped = carver.carve_files()
+        logging.info(f"Files carved: {carved}")
+        logging.info(f"Skipped unmatched headers: {skipped}")
+        if carved == 0:
+            print("No files carved.")
+            logging.error("No files carved.")
+            return 1
         logging.info("File carving completed successfully.")
+        return 0
     except Exception as e:
         logging.error(f"File carving failed: {e}")
+        print(f"Error: file carving failed: {e}")
+        return 1
 
 
 if __name__ == "__main__":
@@ -193,4 +209,4 @@ if __name__ == "__main__":
     #   footer=466f6f746572
     # Run the script:
     #   python file_carver.py test.img output_dir --filetypes filetypes.txt
-    main()
+    sys.exit(main())
