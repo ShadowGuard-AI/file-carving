@@ -51,6 +51,9 @@ class FileCarver:
             raise FileNotFoundError(f"Image file not found: {self.image_path}")
 
         # Create the output directory if it doesn't exist
+        # Validation has a side effect: the output directory is created here, in
+        # the constructor, before any carving happens. Constructing a FileCarver
+        # for a bad image path still leaves a directory behind.
         pathlib.Path(self.output_dir).mkdir(parents=True, exist_ok=True)
 
 
@@ -63,6 +66,10 @@ class FileCarver:
         self.skipped_count = 0
         try:
             with open(self.image_path, 'rb') as f:
+                # The whole image is loaded into memory and every search runs over that
+                # one bytes object. Simple, and it caps the image size this tool can
+                # handle at available RAM. Disk images in the hundreds of gigabytes are
+                # outside what this design can carve.
                 data = f.read()
 
                 for file_type, signatures in self.file_types.items():
@@ -73,6 +80,10 @@ class FileCarver:
                         self.logger.warning(f"No header defined for file type: {file_type}. Skipping.")
                         continue  # Skip if no header is defined.
 
+                    # The hex strings are converted inside this loop, per type, not when the
+                    # file types file is loaded. One malformed hex value raises here, lands
+                    # in the outer except, and ends the whole run instead of skipping that
+                    # one type. Noted as a sharp edge in the current design.
                     header_bytes = bytes.fromhex(header)  # Convert header from hex to bytes
 
                     start_indices = self._find_all(data, header_bytes)
@@ -81,6 +92,10 @@ class FileCarver:
                         end_index = None
                         if footer:
                             footer_bytes = bytes.fromhex(footer)
+                            # The first footer after the header ends the carve. A file embedded
+                            # inside another file of the same type, footer and all, therefore cuts
+                            # the outer carve short at the inner footer. That is the standard
+                            # header and footer tradeoff, and I keep it visible here.
                             end_indices = self._find_all(data[start_index:], footer_bytes)
                             if end_indices:  # Use the *first* footer after the header
                                 end_index = start_index + end_indices[0] + len(footer_bytes)
@@ -89,6 +104,9 @@ class FileCarver:
                                 self.logger.warning(f"Unmatched header for {file_type} at offset {start_index}: no footer found, skipped.")
                         else:
                             # If no footer is specified, try to carve a block_size chunk after the header.
+                            # With no footer defined there is no way to know the real length, so I
+                            # take one block from the header and accept that the result is a guess:
+                            # too short for a big file, padded with whatever follows for a small one.
                             end_index = start_index + self.block_size
 
                         if end_index:
@@ -98,6 +116,10 @@ class FileCarver:
                             # Sanitize the filename using pathlib
                             ext_map = {'jpeg': 'jpg', 'jpg': 'jpg', 'png': 'png', 'gif': 'gif', 'pdf': 'pdf', 'zip': 'zip', 'bmp': 'bmp'}
                             ext = ext_map.get(file_type.lower(), ''.join(c for c in file_type.lower() if c.isalnum()) or 'dat')
+                            # The offset is in the name because two carves of the same type would
+                            # otherwise overwrite each other, and because the offset is the one fact
+                            # a reviewer needs to check a recovered file against the image. A rerun
+                            # into the same directory overwrites the same names, it does not add up.
                             filename = f"recovered_{start_index}_{file_type}.{ext}"
                             file_path = pathlib.Path(self.output_dir) / filename
 
@@ -127,6 +149,9 @@ class FileCarver:
             except ValueError:
                 return indices
             indices.append(start)
+            # The next search starts past the whole match, so overlapping
+            # occurrences of a signature are never reported. Signatures that can
+            # overlap themselves are rare enough that I accept the simpler walk.
             start += len(sub)
         return indices
 
@@ -155,6 +180,10 @@ def load_file_types(filetypes_path):
                 if not line or line.startswith('#'):  # Skip empty lines and comments
                     continue
                 if line.startswith('['): # start of a new file type
+                    # The section name is taken verbatim between the brackets, and keys and
+                    # values are stored unvalidated. A misspelled key just never matches the
+                    # header or footer lookups in carve_files, so the type is skipped as if
+                    # it had no header.
                     current_file_type = line[1:-1]
                     file_types[current_file_type] = {}
                 elif '=' in line: # key value pairs for the file type
